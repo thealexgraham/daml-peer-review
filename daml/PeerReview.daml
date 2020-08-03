@@ -1,0 +1,101 @@
+module PeerReview where
+
+{-
+workflow:
+
+author    : create Paper
+author    : request publication from journal
+journal   : create Review with paper, required votes and reviewers
+reviewers : approve, disapprove
+journal   : resolve review
+    based on number of votes, and requirements, can either
+        Publish : adds paper to list of papers
+        Deny    : send paper back to author
+-}
+
+import PeerReview.Journal
+
+data Vote 
+    = Approve
+    | Deny
+    deriving (Show, Eq)
+
+checkVote : Vote -> Bool
+checkVote Approve = True
+checkVote Deny    = False
+
+data ReviewDenial = ReviewDenial with
+        paper  : Paper
+        reason : Text
+    deriving (Show, Eq)
+
+template Review
+    with
+        journal   : Journal
+        author    : Party
+        paper     : Paper
+        required  : Int
+        votes     : [Vote]
+        voted     : [Party]
+        reviewers : [Party]
+    where
+        signatory journal.owner
+        observer reviewers
+    
+        controller journal.owner can
+            Review_Resolve : Either ReviewDenial (ContractId Journal)
+                do
+                    assertMsg "All all reviewers must vote" $ length voted >= length reviewers
+                    let yes = foldl (\c v -> if checkVote v then c + 1 else c) 0 votes
+                    if  yes >= required
+                    then
+                        Right <$> exerciseByKey @Journal (key journal) 
+                                    Journal_AddPaper with paper
+                    else
+                        return . Left $ ReviewDenial with 
+                            paper
+                            reason = "received: " 
+                                   <> show yes 
+                                   <> " votes, needed: " 
+                                   <> show required
+                        
+        choice Review_Vote : ContractId Review
+            with
+                reviewer : Party
+                vote     : Vote
+            controller reviewer
+            do
+                assertMsg "Party has not been invited to review" $ elem reviewer reviewers
+                assertMsg "Party has already voted" $ notElem reviewer voted
+                create this with 
+                    votes = vote :: votes
+                    voted = reviewer :: voted
+
+
+template ReviewRequest
+    with
+        author  : Party
+        journal : Journal
+        paper   : Paper
+    where
+        signatory author
+
+        controller journal.owner can
+
+            ReviewRequest_Accept : ContractId Review
+                with
+                    required : Int
+                    reviewers : [Party]
+                do
+                    create Review with
+                        journal
+                        author
+                        paper
+                        votes = []
+                        voted = []
+                        required
+                        reviewers
+
+            ReviewRequest_Deny : ()
+                do 
+                    return ()

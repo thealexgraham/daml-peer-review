@@ -1,0 +1,154 @@
+module Test where
+
+import PeerReview
+import PeerReview.Journal
+
+-- |Asserts that the review has failed
+assertFailedReview : Either ReviewDenial (ContractId Journal) -> Scenario ReviewDenial
+assertFailedReview (Left  denial) = pure denial
+assertFailedReview (Right _     ) = fail "Review should have failed"
+
+-- |Asserts that the review has passed
+assertPassedReview : Either ReviewDenial (ContractId Journal) -> Scenario (ContractId Journal)
+assertPassedReview (Left  denial) = fail $ "Review should have failed: " <> show denial
+assertPassedReview (Right jrnl  ) = pure jrnl
+
+-- |Simple data to make it easier to pass back a contract with its ID
+data WithId a = WithId with
+        contract   : a
+        contractId : ContractId a
+    deriving (Show, Eq)
+
+setupParties : Scenario (Party, Party, Party, Party, Party)
+setupParties = scenario do
+    journal_party <- getParty "Journal"
+    author <- getParty "author"
+    r1 <- getParty "reviewer 1"
+    r2 <- getParty "reviewer 2"
+    r3 <- getParty "reviewer 3"
+    return (journal_party, author, r1, r2, r3)
+
+setupScenario  :  Party -> Party -> [Party] -> Scenario (WithId Journal, WithId Paper)
+setupScenario journal_party author readers = scenario do
+    let journal = Journal with
+            owner   = journal_party
+            name    = "DAML Weekly"
+            papers  = []
+            readers = [author] <> readers
+    journal_id <- submit journal_party do
+        create journal
+
+    let paper = Paper with
+            author  = author
+            title   = "Towards a better understanding of DAML"
+            body    = "In this paper, we will discuss learning DAML"
+            readers = []
+
+    paper_id <- submit author do
+        create paper
+    return (WithId with contract = journal; contractId = journal_id
+           ,WithId with contract = paper;   contractId = paper_id)
+
+exerciseVote : ContractId Review -> Party -> Vote -> Update (ContractId Review)
+exerciseVote rid p v = exercise rid Review_Vote with reviewer = p; vote = v
+
+test = scenario do
+
+    -- Setup
+    ------------------------
+
+    -- Create all parties
+    (journal_party, author, r1, r2, r3) <- setupParties
+
+    -- Setup journal and paper
+    ((WithId journal journal_id), (WithId paper paper_id))
+        <- setupScenario journal_party author [r1, r2, r3]
+
+    -- FAIL: Reviewer 1 should not be able to view the paper yet
+    submitMustFail r1 do
+        fetch paper_id
+
+    -- Failing vote
+    --------------------------
+
+    -- Create review request
+    request_id <- submit author do
+        create ReviewRequest with
+                author  = author
+                journal = journal
+                paper   = paper
+
+    -- Accept review request
+    review_id <- submit journal_party do
+        exercise request_id ReviewRequest_Accept with
+                required  = 3
+                reviewers = [r1, r2, r3]
+
+    -- Voting begins
+    review_id <- submit r1 $ exerciseVote review_id r1 Approve
+    review_id <- submit r2 $ exerciseVote review_id r2 Approve
+    review_id <- submit r3 $ exerciseVote review_id r3 Deny
+
+    -- Journal resolves votes
+    reviewed <- submit journal_party do
+        exercise review_id Review_Resolve
+
+    -- ASSERT: Journal should not have enough votes
+    denial <- assertFailedReview reviewed
+
+    -- Author submits updated paper
+    (updated_paper_id, updated_paper) <- submit author do
+        archive paper_id
+        let newPaper = paper with
+                body = "I know a bit more about DAML now."
+        newPaper_id <- create newPaper
+        return (newPaper_id, newPaper)
+
+    -- Successful Vote
+    ------------------------
+
+    -- Author requests the journal to review their updated paper
+    request_id <- submit author do
+        create ReviewRequest with
+                author  = author
+                journal = journal
+                paper   = updated_paper
+
+    -- Accept review request
+    review_id <- submit journal_party do
+        exercise request_id ReviewRequest_Accept with
+            required  =  3
+            reviewers = [r1, r2, r3]
+
+    -- Voting begins
+    review_id <- submit r1 $ exerciseVote review_id r1 Approve
+
+    -- FAIL: Reviewer cannot vote twice
+    submitMustFail r1 $ exerciseVote review_id r1 Approve
+
+
+    review_id <- submit r2 $ exerciseVote review_id r2 Approve
+
+    -- FAIL: All reviewers must vote
+    submitMustFail journal_party $ exercise review_id Review_Resolve
+
+
+    review_id <- submit r3 $ exerciseVote review_id r3 Approve
+
+    -- FAIL: A reviewer not invited to review cannot vote
+    r4 <- getParty "reviewer four"
+    submitMustFail r4 $ exerciseVote review_id r4 Approve
+
+    -- Journal attempts to resolve vote
+    reviewed <- submit journal_party do
+        exercise review_id Review_Resolve
+
+    -- ASSERT: Vote should pass
+    journal_id <- assertPassedReview reviewed
+
+    -- ASSERT: Paper should now be in the journal
+    submit author do
+        journal <- fetch journal_id
+        assert $ updated_paper `elem` journal.papers
+
+    return ()

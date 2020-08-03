@@ -1,0 +1,38 @@
+module PeerReview.Journal where
+
+template Paper
+    with
+        author  : Party
+        title   : Text
+        body    : Text
+        readers : [Party]
+    where
+        signatory author
+        ensure title /= ""
+        observer readers
+
+data JournalKey = JournalKey with
+        owner : Party
+        name  : Text
+    deriving (Show, Eq)
+
+template Journal
+    with
+        owner   : Party
+        name    : Text
+        papers  : [Paper]
+        readers : [Party]
+    where
+        signatory owner
+        observer readers
+        key JournalKey with
+            owner; name : JournalKey
+        maintainer key.owner
+
+        controller owner can
+            Journal_AddPaper : ContractId Journal
+                with
+                    paper : Paper
+                do
+                    create this with
+                        papers = paper :: papers
